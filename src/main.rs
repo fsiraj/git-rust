@@ -14,7 +14,7 @@ use flate2::bufread::ZlibEncoder;
 use sha1::Digest;
 use sha1::Sha1;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Sha1Hash(String);
 
 impl ops::Deref for Sha1Hash {
@@ -31,12 +31,12 @@ impl fmt::Display for Sha1Hash {
 }
 
 #[derive(Debug)]
-enum GitObjectHeader {
+enum GitObjectKind {
     Blob,
     Tree,
 }
 
-impl GitObjectHeader {
+impl GitObjectKind {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Blob => "blob",
@@ -45,14 +45,21 @@ impl GitObjectHeader {
     }
 }
 
+impl fmt::Display for GitObjectKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(Debug)]
 struct GitObject {
-    header: GitObjectHeader,
+    kind: GitObjectKind,
     size: usize,
     content: Vec<u8>,
 }
 
 impl GitObject {
+    /// Computes the hash based on the file content
     pub fn hash(&self) -> Sha1Hash {
         let file_content = self.get_file_content();
         let mut hasher = Sha1::new();
@@ -60,6 +67,7 @@ impl GitObject {
         Sha1Hash(format!("{:x}", hasher.finalize()))
     }
 
+    /// Writes the GitObject to disk after computing it's file content and hash
     pub fn write(&self) -> String {
         let file_content = self.get_file_content();
         let mut encoder = ZlibEncoder::new(&file_content[..], Compression::fast());
@@ -81,22 +89,77 @@ impl GitObject {
         out_path_str
     }
 
+    /// Returns only the content portion of the GitObject
     pub fn get_content_string(&self) -> String {
         String::from_utf8_lossy(&self.content).to_string()
     }
 
+    /// Constructs the file content of the GitObject
     fn get_file_content(&self) -> Vec<u8> {
         let mut result = Vec::<u8>::new();
-        result.extend_from_slice(self.header.as_str().as_bytes());
+        result.extend_from_slice(self.kind.as_str().as_bytes());
         result.push(b' ');
         result.extend_from_slice(self.size.to_string().as_bytes());
         result.push(b'\0');
         result.extend_from_slice(&self.content);
         result
     }
+
+    /// Parses the content as a Git Tree
+    fn parse_as_tree(&self) -> Vec<TreeEntry> {
+        let mut result = Vec::new();
+        let mut start_idx = 0;
+        while start_idx < self.size {
+            // Find the delimiters
+            let space_idx = start_idx
+                + self
+                    .content
+                    .iter()
+                    .skip(start_idx)
+                    .position(|e| *e == b' ')
+                    .expect("Did not find space character");
+            let null_idx = start_idx
+                + self
+                    .content
+                    .iter()
+                    .skip(start_idx)
+                    .position(|e| *e == b'\0')
+                    .expect("Did not find null charcter");
+            let end_idx = null_idx + 1 + 20;
+            // Parse the entry
+            let mode = &self.content[start_idx..space_idx];
+            let mode = str::from_utf8(mode).expect("invalid bytes in mode");
+            let mode = mode.parse::<u32>().expect("unable to parse as integer");
+
+            let name = &self.content[space_idx + 1..null_idx];
+            let name = str::from_utf8(name)
+                .expect("invalid bytes in mode")
+                .to_string();
+
+            let hash = &self.content[null_idx + 1..end_idx];
+            let hash = hash
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>();
+            let hash = Sha1Hash(hash);
+
+            let kind = GitObject::from(hash.clone()).kind;
+
+            result.push(TreeEntry {
+                mode,
+                kind,
+                hash,
+                name,
+            });
+            start_idx = end_idx;
+        }
+
+        result
+    }
 }
 
 impl From<Sha1Hash> for GitObject {
+    /// Parses an existing GitObject from it's Sha1Hash
     fn from(hash: Sha1Hash) -> Self {
         // Read in file contents
         let (dir, file) = (&hash[..2], &hash[2..]);
@@ -121,11 +184,11 @@ impl From<Sha1Hash> for GitObject {
             .position(|el| *el == b'\0')
             .expect("Did not find null characters");
 
-        let header_str = str::from_utf8(&buffer[..space_idx]).expect("invalid utf-8 in header");
-        let header = match header_str {
-            "blob" => GitObjectHeader::Blob,
-            "tree" => GitObjectHeader::Tree,
-            _ => panic!("invalid git object header"),
+        let kind_str = str::from_utf8(&buffer[..space_idx]).expect("invalid utf-8 in kind");
+        let kind = match kind_str {
+            "blob" => GitObjectKind::Blob,
+            "tree" => GitObjectKind::Tree,
+            _ => panic!("invalid git object kind"),
         };
         let size_str =
             str::from_utf8(&buffer[space_idx + 1..null_idx]).expect("invalid utf-8 in size");
@@ -133,7 +196,7 @@ impl From<Sha1Hash> for GitObject {
         let content = buffer[null_idx + 1..].to_vec();
 
         Self {
-            header,
+            kind,
             size,
             content,
         }
@@ -141,15 +204,33 @@ impl From<Sha1Hash> for GitObject {
 }
 
 impl From<&Path> for GitObject {
+    /// Constructs a Git Blob from a Path to any file
     fn from(path: &Path) -> Self {
         let content = fs::read(path).expect("File could not be opened or read");
         let size = content.len();
-        let header = GitObjectHeader::Blob;
+        let kind = GitObjectKind::Blob;
         Self {
-            header,
+            kind,
             size,
             content,
         }
+    }
+}
+
+struct TreeEntry {
+    mode: u32,
+    kind: GitObjectKind,
+    hash: Sha1Hash,
+    name: String,
+}
+
+impl fmt::Display for TreeEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:06} {} {}    {}",
+            self.mode, self.kind, self.hash, self.name
+        )
     }
 }
 
@@ -157,7 +238,6 @@ fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
 
     let args: Vec<String> = env::args().collect();
-    eprintln!("{args:?}");
 
     if args[1] == "init" {
         //
@@ -165,7 +245,7 @@ fn main() {
         fs::create_dir(".git/objects").unwrap();
         fs::create_dir(".git/refs").unwrap();
         fs::write(".git/HEAD", "ref: refs/heads/main\n").unwrap();
-        println!("Initialized git directory")
+        println!("Initialized git directory");
         //
     } else if args[1] == "hash-object" && args[2] == "-w" {
         //
@@ -182,7 +262,24 @@ fn main() {
         print!("{}", git_object.get_content_string());
         //
     } else if args[1] == "ls-tree" {
+        //
+        let (name_only, hash) = if args[2] == "--name-only" {
+            (true, &args[3])
+        } else {
+            (false, &args[2])
+        };
+        let hash = Sha1Hash(hash.clone());
+        let git_object = GitObject::from(hash);
+        let tree = git_object.parse_as_tree();
+        for entry in tree {
+            if name_only {
+                println!("{}", entry.name);
+            } else {
+                println!("{entry}");
+            }
+        }
+        //
     } else {
-        println!("unknown command: {}", args[1])
+        println!("unknown command: {}", args[1]);
     }
 }
