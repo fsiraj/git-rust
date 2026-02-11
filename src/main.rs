@@ -30,7 +30,19 @@ impl fmt::Display for Sha1Hash {
     }
 }
 
-#[derive(Debug)]
+impl Sha1Hash {
+    fn as_bytes(&self) -> [u8; 20] {
+        let mut bytes = [0u8; 20];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            let idx = i * 2;
+            *byte =
+                u8::from_str_radix(&self[idx..idx + 2], 16).expect("invalid hex in sha-1 string");
+        }
+        bytes
+    }
+}
+
+#[derive(Debug, Clone)]
 enum GitObjectKind {
     Blob,
     Tree,
@@ -48,6 +60,37 @@ impl GitObjectKind {
 impl fmt::Display for GitObjectKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+struct TreeEntry {
+    mode: u32,
+    kind: GitObjectKind,
+    hash: Sha1Hash,
+    name: String,
+}
+
+impl fmt::Display for TreeEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:06} {} {}    {}",
+            self.mode, self.kind, self.hash, self.name
+        )
+    }
+}
+
+impl TreeEntry {
+    /// Returns the bytes of the TreeEntry for the Tree GitObject file
+    fn write(&self) -> Vec<u8> {
+        let mut result = Vec::<u8>::new();
+        let mode_str = self.mode.to_string();
+        result.extend_from_slice(mode_str.as_bytes());
+        result.push(b' ');
+        result.extend_from_slice(self.name.as_bytes());
+        result.push(b'\0');
+        result.extend_from_slice(&self.hash.as_bytes());
+        result
     }
 }
 
@@ -126,6 +169,7 @@ impl GitObject {
                     .position(|e| *e == b'\0')
                     .expect("Did not find null charcter");
             let end_idx = null_idx + 1 + 20;
+
             // Parse the entry
             let mode = &self.content[start_idx..space_idx];
             let mode = str::from_utf8(mode).expect("invalid bytes in mode");
@@ -206,31 +250,60 @@ impl From<Sha1Hash> for GitObject {
 impl From<&Path> for GitObject {
     /// Constructs a Git Blob from a Path to any file
     fn from(path: &Path) -> Self {
-        let content = fs::read(path).expect("File could not be opened or read");
-        let size = content.len();
-        let kind = GitObjectKind::Blob;
-        Self {
-            kind,
-            size,
-            content,
+        if path.is_file() {
+            // Blob
+            let kind = GitObjectKind::Blob;
+            let content = fs::read(path).expect("file could not be opened or read");
+            let size = content.len();
+            Self {
+                kind,
+                size,
+                content,
+            }
+        } else {
+            // Tree
+            let kind = GitObjectKind::Tree;
+            // Construct tree entries
+            let mut tree_entries = Vec::<TreeEntry>::new();
+            for entry in fs::read_dir(path).expect("unable to read directory") {
+                let entry = entry.expect("unable to read entry in directory");
+                let entry_path = entry.path();
+                let name = entry_path
+                    .file_name()
+                    .expect("expected a filename")
+                    .to_string_lossy()
+                    .to_string();
+                if name == ".git" {
+                    continue;
+                }
+                if entry_path.is_dir() && fs::read_dir(&entry_path).unwrap().next().is_none() {
+                    continue;
+                }
+                let mode = if entry_path.is_dir() { 40000 } else { 100644 };
+                let git_object = GitObject::from(entry_path.as_path());
+                git_object.write();
+                let hash = git_object.hash();
+                let tree_entry = TreeEntry {
+                    mode,
+                    kind: git_object.kind.clone(),
+                    hash,
+                    name,
+                };
+                tree_entries.push(tree_entry);
+            }
+            // Sort them and then generate content bytes
+            tree_entries.sort_by_key(|entry| entry.name.clone());
+            let mut content = Vec::<u8>::new();
+            for entry in tree_entries {
+                content.extend_from_slice(&entry.write());
+            }
+            let size = content.len();
+            Self {
+                kind,
+                size,
+                content,
+            }
         }
-    }
-}
-
-struct TreeEntry {
-    mode: u32,
-    kind: GitObjectKind,
-    hash: Sha1Hash,
-    name: String,
-}
-
-impl fmt::Display for TreeEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{:06} {} {}    {}",
-            self.mode, self.kind, self.hash, self.name
-        )
     }
 }
 
@@ -279,6 +352,11 @@ fn main() {
             }
         }
         //
+    } else if args[1] == "write-tree" {
+        let root = Path::new(".");
+        let tree = GitObject::from(root);
+        tree.write();
+        println!("{}", tree.hash());
     } else {
         println!("unknown command: {}", args[1]);
     }
