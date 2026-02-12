@@ -8,6 +8,8 @@ use std::io::Read;
 use std::ops;
 use std::path::Path;
 
+use chrono::Local;
+use chrono::Offset;
 use flate2::Compression;
 use flate2::bufread::ZlibDecoder;
 use flate2::bufread::ZlibEncoder;
@@ -46,6 +48,7 @@ impl Sha1Hash {
 enum GitObjectKind {
     Blob,
     Tree,
+    Commit,
 }
 
 impl GitObjectKind {
@@ -53,6 +56,7 @@ impl GitObjectKind {
         match self {
             Self::Blob => "blob",
             Self::Tree => "tree",
+            Self::Commit => "commit",
         }
     }
 }
@@ -82,7 +86,7 @@ impl fmt::Display for TreeEntry {
 
 impl TreeEntry {
     /// Returns the bytes of the TreeEntry for the Tree GitObject file
-    fn write(&self) -> Vec<u8> {
+    fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::<u8>::new();
         let mode_str = self.mode.to_string();
         result.extend_from_slice(mode_str.as_bytes());
@@ -102,9 +106,20 @@ struct GitObject {
 }
 
 impl GitObject {
+    /// Constructs the file content of the GitObject
+    fn serialize(&self) -> Vec<u8> {
+        let mut result = Vec::<u8>::new();
+        result.extend_from_slice(self.kind.as_str().as_bytes());
+        result.push(b' ');
+        result.extend_from_slice(self.size.to_string().as_bytes());
+        result.push(b'\0');
+        result.extend_from_slice(&self.content);
+        result
+    }
+
     /// Computes the hash based on the file content
     pub fn hash(&self) -> Sha1Hash {
-        let file_content = self.get_file_content();
+        let file_content = self.serialize();
         let mut hasher = Sha1::new();
         hasher.update(&file_content);
         Sha1Hash(format!("{:x}", hasher.finalize()))
@@ -112,7 +127,7 @@ impl GitObject {
 
     /// Writes the GitObject to disk after computing it's file content and hash
     pub fn write(&self) -> String {
-        let file_content = self.get_file_content();
+        let file_content = self.serialize();
         let mut encoder = ZlibEncoder::new(&file_content[..], Compression::fast());
         let mut compressed = Vec::<u8>::new();
         encoder
@@ -133,23 +148,14 @@ impl GitObject {
     }
 
     /// Returns only the content portion of the GitObject
-    pub fn get_content_string(&self) -> String {
+    fn parse_as_blob(&self) -> String {
+        // assert!(matches!(self.kind, GitObjectKind::Blob));
         String::from_utf8_lossy(&self.content).to_string()
-    }
-
-    /// Constructs the file content of the GitObject
-    fn get_file_content(&self) -> Vec<u8> {
-        let mut result = Vec::<u8>::new();
-        result.extend_from_slice(self.kind.as_str().as_bytes());
-        result.push(b' ');
-        result.extend_from_slice(self.size.to_string().as_bytes());
-        result.push(b'\0');
-        result.extend_from_slice(&self.content);
-        result
     }
 
     /// Parses the content as a Git Tree
     fn parse_as_tree(&self) -> Vec<TreeEntry> {
+        assert!(matches!(self.kind, GitObjectKind::Tree));
         let mut result = Vec::new();
         let mut start_idx = 0;
         while start_idx < self.size {
@@ -248,7 +254,7 @@ impl From<Sha1Hash> for GitObject {
 }
 
 impl From<&Path> for GitObject {
-    /// Constructs a Git Blob from a Path to any file
+    /// Constructs a Git Blob or Tree from a Path to any file or directory
     fn from(path: &Path) -> Self {
         if path.is_file() {
             // Blob
@@ -295,7 +301,7 @@ impl From<&Path> for GitObject {
             tree_entries.sort_by_key(|entry| entry.name.clone());
             let mut content = Vec::<u8>::new();
             for entry in tree_entries {
-                content.extend_from_slice(&entry.write());
+                content.extend_from_slice(&entry.serialize());
             }
             let size = content.len();
             Self {
@@ -305,6 +311,43 @@ impl From<&Path> for GitObject {
             }
         }
     }
+}
+
+impl From<(Sha1Hash, Option<Sha1Hash>, String)> for GitObject {
+    fn from(hashes: (Sha1Hash, Option<Sha1Hash>, String)) -> Self {
+        let (tree_hash, parent_hash, message) = hashes;
+        let kind = GitObjectKind::Commit;
+        let mut content = Vec::<u8>::new();
+        content.extend_from_slice(format!("tree {}\n", tree_hash).as_bytes());
+        if parent_hash.is_some() {
+            content.extend_from_slice(format!("parent {}\n", parent_hash.unwrap()).as_bytes());
+        }
+        let timestamp = get_timestamp_str();
+        for field in ["author", "committer"] {
+            content.extend_from_slice(
+                format!("{} fsiraj <fsiraj@git.com> {}\n", field, timestamp).as_bytes(),
+            );
+        }
+        content.push(b'\n');
+        content.extend_from_slice(message.as_bytes());
+        content.push(b'\n');
+        let size = content.len();
+        Self {
+            kind,
+            size,
+            content,
+        }
+    }
+}
+
+fn get_timestamp_str() -> String {
+    let now = Local::now();
+    let timestamp = now.timestamp();
+    let offset = now.offset().fix().local_minus_utc();
+    let hours = offset / 3600;
+    let minutes = (offset.abs() % 3600) / 60;
+    let timezone = format!("{:+03}{:02}", hours, minutes);
+    format!("{} {}", timestamp, timezone)
 }
 
 fn main() {
@@ -332,7 +375,7 @@ fn main() {
         //
         let hash = Sha1Hash(args[3].clone());
         let git_object = GitObject::from(hash);
-        print!("{}", git_object.get_content_string());
+        print!("{}", git_object.parse_as_blob());
         //
     } else if args[1] == "ls-tree" {
         //
@@ -353,10 +396,25 @@ fn main() {
         }
         //
     } else if args[1] == "write-tree" {
+        //
         let root = Path::new(".");
         let tree = GitObject::from(root);
         tree.write();
         println!("{}", tree.hash());
+        //
+    } else if args[1] == "commit-tree" {
+        //
+        let tree_hash = Sha1Hash(args[2].clone());
+        let parent_hash = (args[3] == "-p").then(|| Sha1Hash(args[4].clone()));
+        let message = if args[3] == "-m" {
+            args[4].clone()
+        } else {
+            args[6].clone()
+        };
+        let commit = GitObject::from((tree_hash, parent_hash, message));
+        commit.write();
+        println!("{}", commit.hash());
+        //
     } else {
         println!("unknown command: {}", args[1]);
     }
