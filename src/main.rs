@@ -8,6 +8,7 @@ use std::io::Read;
 use std::ops;
 use std::path::Path;
 
+use clap::{Parser, Subcommand};
 use chrono::Local;
 use chrono::Offset;
 use flate2::Compression;
@@ -350,72 +351,112 @@ fn get_timestamp_str() -> String {
     format!("{} {}", timestamp, timezone)
 }
 
+#[derive(Parser)]
+#[command(name = "git")]
+#[command(about = "A simple git implementation")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Initialize a new git repository
+    Init,
+    /// Compute object ID and optionally creates a blob from a file
+    HashObject {
+        /// Write the object to the database
+        #[arg(short = 'w')]
+        write: bool,
+        /// The file to hash
+        file: String,
+    },
+    /// Provide content for repository objects
+    CatFile {
+        /// Pretty-print the contents
+        #[arg(short = 'p')]
+        pretty_print: bool,
+        /// Object hash
+        hash: String,
+    },
+    /// List the contents of a tree object
+    LsTree {
+        /// List only filenames
+        #[arg(long)]
+        name_only: bool,
+        /// Tree hash
+        hash: String,
+    },
+    /// Create a tree object from the current directory
+    WriteTree,
+    /// Create a new commit object
+    CommitTree {
+        /// Tree hash
+        tree_hash: String,
+        /// Parent commit hash
+        #[arg(short = 'p')]
+        parent: Option<String>,
+        /// Commit message
+        #[arg(short = 'm')]
+        message: String,
+    },
+}
+
+
 fn main() {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
+    let cli = Cli::parse();
 
-    let args: Vec<String> = env::args().collect();
-
-    if args[1] == "init" {
-        //
-        fs::create_dir(".git").unwrap();
-        fs::create_dir(".git/objects").unwrap();
-        fs::create_dir(".git/refs").unwrap();
-        fs::write(".git/HEAD", "ref: refs/heads/main\n").unwrap();
-        println!("Initialized git directory");
-        //
-    } else if args[1] == "hash-object" && args[2] == "-w" {
-        //
-        let in_path_str = &args[3];
-        let in_path = Path::new(in_path_str);
-        let git_object = GitObject::from(in_path);
-        git_object.write();
-        println!("{}", git_object.hash());
-        //
-    } else if args[1] == "cat-file" && args[2] == "-p" {
-        //
-        let hash = Sha1Hash(args[3].clone());
-        let git_object = GitObject::from(hash);
-        print!("{}", git_object.parse_as_blob());
-        //
-    } else if args[1] == "ls-tree" {
-        //
-        let (name_only, hash) = if args[2] == "--name-only" {
-            (true, &args[3])
-        } else {
-            (false, &args[2])
-        };
-        let hash = Sha1Hash(hash.clone());
-        let git_object = GitObject::from(hash);
-        let tree = git_object.parse_as_tree();
-        for entry in tree {
-            if name_only {
-                println!("{}", entry.name);
-            } else {
-                println!("{entry}");
+    match cli.command {
+        Commands::Init => {
+            fs::create_dir(".git").unwrap();
+            fs::create_dir(".git/objects").unwrap();
+            fs::create_dir(".git/refs").unwrap();
+            fs::write(".git/HEAD", "ref: refs/heads/main\n").unwrap();
+            println!("Initialized git directory");
+        }
+        Commands::HashObject { write, file } => {
+            let in_path = Path::new(&file);
+            let git_object = GitObject::from(in_path);
+            println!("{}", git_object.hash());
+            if write {
+                git_object.write();
             }
         }
-        //
-    } else if args[1] == "write-tree" {
-        //
-        let root = Path::new(".");
-        let tree = GitObject::from(root);
-        tree.write();
-        println!("{}", tree.hash());
-        //
-    } else if args[1] == "commit-tree" {
-        //
-        let tree_hash = Sha1Hash(args[2].clone());
-        let parent_hash = (args[3] == "-p").then(|| Sha1Hash(args[4].clone()));
-        let message = if args[3] == "-m" {
-            args[4].clone()
-        } else {
-            args[6].clone()
-        };
-        let commit = GitObject::from((tree_hash, parent_hash, message));
-        commit.write();
-        println!("{}", commit.hash());
-        //
-    } else {
-        println!("unknown command: {}", args[1]);
+        Commands::CatFile { pretty_print, hash } => {
+            if pretty_print {
+                let hash = Sha1Hash(hash);
+                let git_object = GitObject::from(hash);
+                print!("{}", git_object.parse_as_blob());
+            }
+        }
+        Commands::LsTree { name_only, hash } => {
+            let hash = Sha1Hash(hash);
+            let git_object = GitObject::from(hash);
+            let tree = git_object.parse_as_tree();
+            for entry in tree {
+                if name_only {
+                    println!("{}", entry.name);
+                } else {
+                    println!("{entry}");
+                }
+            }
+        }
+        Commands::WriteTree => {
+            let root = Path::new(".");
+            let tree = GitObject::from(root);
+            tree.write();
+            println!("{}", tree.hash());
+        }
+        Commands::CommitTree {
+            tree_hash,
+            parent,
+            message,
+        } => {
+            let tree_hash = Sha1Hash(tree_hash);
+            let parent_hash = parent.map(Sha1Hash);
+            let commit = GitObject::from((tree_hash, parent_hash, message));
+            commit.write();
+            println!("{}", commit.hash());
+        }
     }
 }
