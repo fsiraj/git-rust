@@ -133,7 +133,7 @@ impl GitObject {
         let mut compressed = Vec::<u8>::new();
         encoder
             .read_to_end(&mut compressed)
-            .expect("Compression failed");
+            .expect("compression failed");
         let hash = self.hash();
         let (dir, file) = (&hash[..2], &hash[2..]);
         let out_path_str = format!(".git/objects/{dir}/{file}");
@@ -141,10 +141,10 @@ impl GitObject {
         fs::create_dir_all(
             out_path
                 .parent()
-                .expect("Git object must have parent folder in objects"),
+                .expect("git object must have parent folder in objects"),
         )
-        .expect("Could not create a directory");
-        fs::write(out_path, compressed).expect("Could not create or write to file");
+        .expect("could not create a directory");
+        fs::write(out_path, compressed).expect("could not create or write to file");
         out_path_str
     }
 
@@ -167,14 +167,14 @@ impl GitObject {
                     .iter()
                     .skip(start_idx)
                     .position(|e| *e == b' ')
-                    .expect("Did not find space character");
+                    .expect("did not find space character");
             let null_idx = start_idx
                 + self
                     .content
                     .iter()
                     .skip(start_idx)
                     .position(|e| *e == b'\0')
-                    .expect("Did not find null charcter");
+                    .expect("did not find null charcter");
             let end_idx = null_idx + 1 + 20;
 
             // Parse the entry
@@ -217,23 +217,23 @@ impl From<Sha1Hash> for GitObject {
         let path_str = format!(".git/objects/{dir}/{file}");
         let path = Path::new(&path_str);
 
-        let file = fs::File::open(path).expect("File could not be opened");
+        let file = fs::File::open(path).expect("file could not be opened");
         let reader = io::BufReader::new(file);
         let mut decoder = ZlibDecoder::new(reader);
         let mut buffer = Vec::<u8>::new();
         let _num_bytes = decoder
             .read_to_end(&mut buffer)
-            .expect("File could not be read");
+            .expect("file could not be read");
 
         // Parse file contents
         let space_idx = buffer
             .iter()
             .position(|el| *el == b' ')
-            .expect("Did not find kind delimiter");
+            .expect("did not find kind delimiter");
         let null_idx = buffer
             .iter()
             .position(|el| *el == b'\0')
-            .expect("Did not find null characters");
+            .expect("did not find null characters");
 
         let kind_str = str::from_utf8(&buffer[..space_idx]).expect("invalid utf-8 in kind");
         let kind = match kind_str {
@@ -320,8 +320,8 @@ impl From<(Sha1Hash, Option<Sha1Hash>, String)> for GitObject {
         let kind = GitObjectKind::Commit;
         let mut content = Vec::<u8>::new();
         content.extend_from_slice(format!("tree {}\n", tree_hash).as_bytes());
-        if parent_hash.is_some() {
-            content.extend_from_slice(format!("parent {}\n", parent_hash.unwrap()).as_bytes());
+        if let Some(parent_hash) = parent_hash {
+            content.extend_from_slice(format!("parent {}\n", parent_hash).as_bytes());
         }
         let timestamp = get_timestamp_str();
         for field in ["author", "committer"] {
